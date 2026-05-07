@@ -33,8 +33,8 @@ This repository provides scripts to:
 
 | Script | OS | Description |
 |--------|----|-------------|
-| [`disable-chrome-ai-model.sh`](disable-chrome-ai-model.sh) | Linux/Ubuntu | Bash script to disable the AI model and clean up files. |
-| [`disable-chrome-ai-model.ps1`](disable-chrome-ai-model.ps1) | Windows | PowerShell script for Windows (requires admin rights). |
+| [`kill-google-nano.sh`](disable-chrome-ai-model.sh) | Linux/Ubuntu | Bash script to disable the AI model and clean up files. |
+| [`kill-google-nano.ps1`](disable-chrome-ai-model.ps1) | Windows | PowerShell script for Windows (requires admin rights). |
 
 ---
 
