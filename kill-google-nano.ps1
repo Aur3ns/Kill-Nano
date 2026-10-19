@@ -1,88 +1,170 @@
-# kill-google-nano.ps1
-# PowerShell script to block Chrome's local AI model
-# Removes OptGuideOnDeviceModel / weights.bin and applies a Chrome policy.
-
-$ErrorActionPreference = "Stop"
-
-$PolicyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
-$PolicyName = "GenAILocalFoundationalModelSettings"
-$PolicyValue = 1
-
-$ChromeUserData = "$env:LOCALAPPDATA\Google\Chrome\User Data"
-
-Write-Host "[1/6] Checking administrator rights..."
-
-$IsAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-if (-not $IsAdmin) {
-    Write-Host "Error: run this script as Administrator."
-    exit 1
-}
-
-Write-Host "[2/6] Closing Chrome..."
-
-Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-
-Write-Host "[3/6] Creating Chrome policy..."
-
-if (-not (Test-Path $PolicyPath)) {
-    New-Item -Path $PolicyPath -Force | Out-Null
-}
-
-New-ItemProperty `
-    -Path $PolicyPath `
-    -Name $PolicyName `
-    -Value $PolicyValue `
-    -PropertyType DWord `
-    -Force | Out-Null
-
-Write-Host "[4/6] Removing already downloaded models..."
-
-$Targets = @(
-    "$ChromeUserData\OptGuideOnDeviceModel",
-    "$ChromeUserData\optimization_guide_model_store"
+# Kill-Nano: prevent Google Chrome downloading its on-device foundational AI model.
+[CmdletBinding()]
+param(
+    [ValidateSet('Install', 'Status', 'Restore')]
+    [string]$Action = 'Install',
+    [switch]$DryRun,
+    [switch]$SkipCleanup,
+    [switch]$DnsAutomatic
 )
 
-foreach ($Target in $Targets) {
-    if (Test-Path $Target) {
-        Write-Host "Removing: $Target"
-        Remove-Item -Path $Target -Recurse -Force -ErrorAction SilentlyContinue
-    }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$ChromePolicyPath = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
+$StatePath = 'HKLM:\SOFTWARE\KillNano'
+$ModelPolicyName = 'GenAILocalFoundationalModelSettings'
+$DnsPolicyName = 'DnsOverHttpsMode'
+$ChromeUserData = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'
+
+function Get-RegistryValue {
+    param([string]$Path, [string]$Name)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $property = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction SilentlyContinue
+    if ($null -eq $property) { return $null }
+    return $property.$Name
 }
 
-Write-Host "[5/6] Searching for remaining weights.bin files..."
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
-if (Test-Path $ChromeUserData) {
-    $Found = Get-ChildItem `
-        -Path $ChromeUserData `
-        -Filter "weights.bin" `
-        -Recurse `
-        -Force `
-        -ErrorAction SilentlyContinue
-
-    if ($Found) {
-        Write-Host "Warning: some weights.bin files still exist:"
-        $Found | ForEach-Object {
-            Write-Host $_.FullName
+function Set-ManagedValue {
+    param(
+        [string]$Name,
+        [object]$Value,
+        [string]$PropertyType,
+        [string]$Marker
+    )
+    $current = Get-RegistryValue -Path $ChromePolicyPath -Name $Name
+    if ($null -ne $current) {
+        if ([string]$current -ne [string]$Value) {
+            throw "Refusing to overwrite existing Chrome policy $Name ($current)."
         }
-    } else {
-        Write-Host "No weights.bin file found in the Chrome user directory."
+        Write-Host "Already configured: $Name = $current (not claiming ownership)."
+        return
     }
-} else {
-    Write-Host "Chrome user data directory not found."
+    if ($DryRun) {
+        Write-Host "[dry-run] Would set $Name = $Value"
+        return
+    }
+    New-Item -Path $ChromePolicyPath -Force | Out-Null
+    New-Item -Path $StatePath -Force | Out-Null
+    # Ownership marker allows -Action Restore without deleting someone else's policy.
+    New-ItemProperty -Path $StatePath -Name $Marker -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $ChromePolicyPath -Name $Name -Value $Value -PropertyType $PropertyType -Force | Out-Null
+    Write-Host "Installed: $Name = $Value"
 }
 
-Write-Host "[6/6] Done."
+function Remove-OwnedValue {
+    param([string]$Name, [object]$Expected, [string]$Marker)
+    $owned = Get-RegistryValue -Path $StatePath -Name $Marker
+    $current = Get-RegistryValue -Path $ChromePolicyPath -Name $Name
+    if ($owned -ne 1) {
+        Write-Host "Not removing $Name: no Kill-Nano ownership record."
+        return
+    }
+    if ($null -ne $current -and [string]$current -ne [string]$Expected) {
+        throw "Refusing to remove modified policy $Name ($current)."
+    }
+    if ($DryRun) {
+        Write-Host "[dry-run] Would remove $Name and its ownership record."
+        return
+    }
+    if ($null -ne $current) {
+        Remove-ItemProperty -Path $ChromePolicyPath -Name $Name
+    }
+    Remove-ItemProperty -Path $StatePath -Name $Marker
+    Write-Host "Restored: $Name"
+}
 
-Write-Host ""
-Write-Host "Now restart Chrome and check:"
-Write-Host "  chrome://policy/"
-Write-Host ""
-Write-Host "You should see:"
-Write-Host "  GenAILocalFoundationalModelSettings = 1"
-Write-Host ""
-Write-Host "You can also verify with PowerShell:"
-Write-Host "  Get-ChildItem `"$ChromeUserData`" -Filter weights.bin -Recurse -Force -ErrorAction SilentlyContinue"
+if ($Action -ne 'Install' -and ($SkipCleanup -or $DnsAutomatic)) {
+    throw '-SkipCleanup and -DnsAutomatic are only valid with -Action Install.'
+}
+
+if ($Action -eq 'Status') {
+    Write-Host "Model policy: $(Get-RegistryValue -Path $ChromePolicyPath -Name $ModelPolicyName)"
+    Write-Host "DNS-over-HTTPS policy: $(Get-RegistryValue -Path $ChromePolicyPath -Name $DnsPolicyName)"
+    Write-Host 'Check chrome://policy for the effective policy and any other administrators.'
+    return
+}
+
+if (-not (Test-IsAdministrator)) {
+    throw 'Run PowerShell as Administrator to install or restore machine policies.'
+}
+
+if ($Action -eq 'Restore') {
+    # Preflight all owned policies before making any changes.
+    foreach ($entry in @(
+        @{ Name = $ModelPolicyName; Expected = '1'; Marker = 'OwnsModelPolicy' },
+        @{ Name = $DnsPolicyName; Expected = 'automatic'; Marker = 'OwnsDnsPolicy' }
+    )) {
+        $owned = Get-RegistryValue -Path $StatePath -Name $entry.Marker
+        $current = Get-RegistryValue -Path $ChromePolicyPath -Name $entry.Name
+        if ($owned -eq 1 -and $null -ne $current -and [string]$current -ne $entry.Expected) {
+            throw "Refusing to remove modified policy $($entry.Name) ($current)."
+        }
+    }
+    Remove-OwnedValue -Name $ModelPolicyName -Expected 1 -Marker 'OwnsModelPolicy'
+    Remove-OwnedValue -Name $DnsPolicyName -Expected 'automatic' -Marker 'OwnsDnsPolicy'
+    Write-Host 'Restart Chrome and inspect chrome://policy. Other system policies are untouched.'
+    return
+}
+
+# Check for conflicts before changing anything.
+$modelExisting = Get-RegistryValue -Path $ChromePolicyPath -Name $ModelPolicyName
+if ($null -ne $modelExisting -and [string]$modelExisting -ne '1') {
+    throw "A different managed model policy already exists: $modelExisting"
+}
+if ($DnsAutomatic) {
+    $dnsExisting = Get-RegistryValue -Path $ChromePolicyPath -Name $DnsPolicyName
+    if ($null -ne $dnsExisting -and [string]$dnsExisting -ne 'automatic') {
+        throw "A different managed DNS-over-HTTPS policy already exists: $dnsExisting"
+    }
+}
+
+Set-ManagedValue -Name $ModelPolicyName -Value 1 -PropertyType DWord -Marker 'OwnsModelPolicy'
+if ($DnsAutomatic) {
+    Set-ManagedValue -Name $DnsPolicyName -Value 'automatic' -PropertyType String -Marker 'OwnsDnsPolicy'
+} else {
+    Write-Host 'DNS-over-HTTPS is unchanged. Managed Chrome may disable Secure DNS by default.'
+}
+
+if ($SkipCleanup) {
+    Write-Host 'Model-file cleanup skipped by request.'
+} elseif (Get-Process -Name chrome -ErrorAction SilentlyContinue) {
+    Write-Warning 'Chrome is running. Not deleting live model data; close Chrome and rerun to clean up.'
+} elseif (Test-Path -LiteralPath $ChromeUserData -PathType Container) {
+    foreach ($folder in @('OptGuideOnDeviceModel')) {
+        $target = Join-Path $ChromeUserData $folder
+        if (-not (Test-Path -LiteralPath $target)) { continue }
+        $item = Get-Item -LiteralPath $target -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Write-Warning "Refusing to remove reparse point: $target"
+            continue
+        }
+        if (-not $item.PSIsContainer) {
+            Write-Warning "Expected a directory, leaving file untouched: $target"
+            continue
+        }
+        if ($DryRun) {
+            Write-Host "[dry-run] Would remove $target"
+        } else {
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+            Write-Host "Removed: $target"
+        }
+    }
+}
+
+if (Test-Path -LiteralPath $ChromeUserData -PathType Container) {
+    Write-Host 'Remaining weights.bin files (possibly unrelated to the foundational AI model):'
+    Get-ChildItem -LiteralPath $ChromeUserData -File -Filter 'weights.bin' -Recurse -Force `
+        -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+}
+if ($DryRun) {
+    Write-Host '[dry-run] No changes were made.'
+} else {
+    Write-Host 'Done. Restart Chrome and verify GenAILocalFoundationalModelSettings = 1 at chrome://policy.'
+}
