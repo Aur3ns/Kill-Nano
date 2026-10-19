@@ -63,7 +63,7 @@ function Remove-OwnedValue {
     $owned = Get-RegistryValue -Path $StatePath -Name $Marker
     $current = Get-RegistryValue -Path $ChromePolicyPath -Name $Name
     if ($owned -ne 1) {
-        Write-Host "Not removing $Name: no Kill-Nano ownership record."
+        Write-Host "Not removing ${Name}: no Kill-Nano ownership record."
         return
     }
     if ($null -ne $current -and [string]$current -ne [string]$Expected) {
