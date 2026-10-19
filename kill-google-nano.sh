@@ -196,7 +196,9 @@ fi
 if [[ -d "$CHROME_CONFIG" || -d "$CHROME_CACHE" ]]; then
   echo 'Checking for remaining weights.bin files (including other Chrome model types):'
   for dir in "$CHROME_CONFIG" "$CHROME_CACHE"; do
-    [[ -d "$dir" ]] && find "$dir" -type f -name weights.bin -print 2>/dev/null || true
+    if [[ -d "$dir" ]]; then
+      find "$dir" -type f -name weights.bin -print 2>/dev/null || true
+    fi
   done
 fi
 if (( DRY_RUN )); then
